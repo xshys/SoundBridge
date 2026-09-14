@@ -2,11 +2,19 @@ services:
   yt-dlp:
     image: jauderho/yt-dlp:latest
     container_name: yt-dlp-music
+    # Downloaded files get this owner. Change it if your user is not 1000:1000 (check with: id).
+    user: "1000:1000"
+    environment:
+      # The image has HOME=/ and a root-owned /.cache, so as a normal user yt-dlp cannot write
+      # its cache (it re-fetches the YouTube player data every run, which invites 403s).
+      - HOME=/tmp
     volumes:
       - /mylibrary/media/music:/music
     entrypoint: sleep infinity
     restart: unless-stopped
 
+  # Stays root on purpose: it installs docker-cli at startup and talks to the docker socket.
+  # It never writes to /music - yt-dlp does - so it does not need to match your uid.
   api:
     image: node:20-alpine
     container_name: yt-audio-api

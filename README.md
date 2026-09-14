@@ -52,7 +52,36 @@ API_KEY=CHANGE_ME_LONG_RANDOM
 MUSIC_ROOT=/mylibrary/media/music
 YTDLP_CONTAINER=yt-dlp-music
 CORS_ORIGINS=chrome-extension://*,moz-extension://*
+
+# Audio (optional)
+AUDIO_FORMAT=mp3
+AUDIO_QUALITY=0
+NORMALIZE_AUDIO=0
+LOUDNORM_TARGET=-14
+
+# Playlist / concurrency (optional)
+MAX_PLAYLIST_ITEMS=50
+MAX_CONCURRENT_JOBS=2
 ```
+
+Audio options (all optional, the defaults reproduce the behaviour of previous versions):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AUDIO_FORMAT` | `mp3` | Output format: `mp3`, `m4a`, `opus`, `flac`, `best`. An unknown value falls back to `mp3`. |
+| `AUDIO_QUALITY` | `0` | yt-dlp audio quality: `0`-`9` (0 = best) or a bitrate such as `192K`. |
+| `NORMALIZE_AUDIO` | `0` | `1` normalizes loudness to EBU R128 while extracting the audio. |
+| `LOUDNORM_TARGET` | `-14` | Target integrated loudness in LUFS (`-14` streaming reference, `-16` for spoken content). |
+| `MAX_PLAYLIST_ITEMS` | `50` | Hard cap on tracks downloaded from a single playlist. |
+| `MAX_CONCURRENT_JOBS` | `2` | Jobs allowed to run at once; further requests get `429`. |
+
+⚠️ **Normalization rewrites the audio and is irreversible**: files already in your library are never
+touched, but a normalized download cannot be "un-normalized" without downloading it again. It also
+roughly doubles the processing time per track. Leave it off unless volume differences bother you.
+
+Tags (`artist`, `title`, `album`, cover art) are always embedded: titles like
+`Artist - Song (Official Video)` are cleaned and split into the proper artist/title tags, and
+tracks downloaded from a playlist get the playlist name as `album`.
 
 Tip: generate a long random key for api key:
 
@@ -116,12 +145,25 @@ Firefox supports MV3 with some differences; for testing:
 - Click Load Temporary Add-on
 - Select extension/manifest.json
 
-##Extension Configuration:
+## Extension Configuration:
 Open the extension options and set:
 
-- API Base URL: http://<LAN_SERVER_IP>:8787
+- API Base URL: http://<LAN_SERVER_IP>:8787 (the scheme is added automatically if you omit it)
 - API Key: the one in backend/.env
 - Press Test Connection → it should display Connection OK ✅
+- Notifications (optional): get a desktop notification when a download finishes, even with the
+  popup closed. Enabling it asks for an extra browser permission; disabling it gives the
+  permission back and stops all background activity.
+- Favorite folders (optional): save up to 10 folder names. They show up in the popup as
+  one-click buttons, so you don't have to scroll a long list every time. A favorite that does
+  not exist on the server yet is created on the first download into it.
+
+The popup also remembers the last folder you downloaded into and pre-selects it.
+
+Closing the popup does not interrupt anything: the download runs on the server. Re-open it and
+the log and the progress come back exactly where they were - they are re-read from the API, the
+extension stores no log of its own. With notifications enabled you also get told when it is over
+without re-opening anything.
 
 ---
 # Disclaimer
@@ -149,6 +191,14 @@ This software is provided **“as is”**, without warranty of any kind, express
 - Click the extension icon
 - Select a folder or type a new target folder
 - Click "Download Audio"
+
+For a playlist URL (or a video opened from a playlist), a **Download the whole playlist**
+checkbox appears: tick it to fetch every track into the same folder, up to `MAX_PLAYLIST_ITEMS`.
+Progress is shown as `Track 3/12`. Auto-generated mixes (`list=RD...`) work too: they never
+declare a total, so `MAX_PLAYLIST_ITEMS` is what ends them. Watch Later and Liked videos are not
+supported - they are tied to your account and yt-dlp cannot see them without login cookies.
+Tracks get the playlist name as their `album` tag. Leave the box unticked and only the single
+video is downloaded, exactly as before.
 
 After the download completes, Your media server (like Jellyfin, Navidrome ecc...) will index the new files (according to its scheduled scanning settings).
 
@@ -362,10 +412,10 @@ docker compose logs -f yt-audio-api
 
 ## Roadmap:
 
-- Playlist download
-- Preset folders
-- Audio tagging / ID3 + normalization
-- Browser notifications
+- ✅ Playlist download
+- ✅ Preset folders
+- ✅ Audio tagging / ID3 + normalization (see `NORMALIZE_AUDIO` above)
+- ✅ Browser notifications
 
 ## License
 

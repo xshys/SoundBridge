@@ -201,6 +201,45 @@
     }
     .btn-secondary:hover{ background: var(--surface-2); }
 
+    .check{
+      display:flex;
+      align-items:center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .check input{ accent-color: var(--primary); cursor: pointer; }
+
+    .chips{
+      display:flex;
+      flex-wrap:wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .chip{
+      display:inline-flex;
+      align-items:center;
+      gap: 6px;
+      padding: 6px 8px 6px 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--outline);
+      background: var(--surface-2);
+      color: var(--text);
+      font-size: 12px;
+    }
+    .chip button{
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 15px;
+      line-height: 1;
+      padding: 0 2px;
+    }
+    .chip button:hover{ color: var(--danger); }
+    .chip button:focus{ outline:none; color: var(--danger); }
+
     .divider{
       height: 1px;
       background: var(--outline);
@@ -333,6 +372,25 @@
               </button>
             </div>
             <div class="hint">Keep it secret. Rotate immediately if leaked.</div>
+          </div>
+
+          <div>
+            <label>Notifications</label>
+            <label class="check">
+              <input type="checkbox" id="notifyToggle" />
+              <span>Notify me when a download finishes (even with the popup closed)</span>
+            </label>
+            <div class="hint">Asks for an extra browser permission the first time you enable it.</div>
+          </div>
+
+          <div>
+            <label>Favorite folders</label>
+            <div style="display:flex; gap:8px;">
+              <input id="presetInput" class="field" placeholder="e.g. Trance 2026" maxlength="80" />
+              <button id="presetAdd" class="btn btn-secondary" type="button" style="flex:0 0 auto;">Add</button>
+            </div>
+            <div id="presetList" class="chips"></div>
+            <div class="hint">Up to 10. They appear as one-click buttons in the popup.</div>
           </div>
         </div>
 

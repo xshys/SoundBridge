@@ -129,14 +129,142 @@ function escapeHtml(s) {
 }
 
 // ---------- Actions ----------
+// Without a scheme the value is treated as a relative path and every request
+// resolves against chrome-extension://<id>/ (ERR_FILE_NOT_FOUND), so normalize here:
+// this is the only place the base URL is written.
+function normalizeBaseUrl(raw) {
+  const s = (raw || "").trim();
+  if (!s) return "";
+
+  // Only http/https: a mistyped or unsupported scheme must not be silently prefixed.
+  if (/:\/\//.test(s) && !/^https?:\/\//i.test(s)) return "";
+
+  // Scheme first, trailing slashes after: stripping them first turns "http://" into "http:".
+  const withScheme = /^https?:\/\//i.test(s) ? s : `http://${s}`;
+  try {
+    const u = new URL(withScheme);
+    // Rejects a mistyped scheme ("htp://host" would otherwise parse with host "htp").
+    return /^[a-z0-9.\-\[\]:]+$/i.test(u.host) ? withScheme.replace(/\/+$/, "") : "";
+  } catch {
+    return "";
+  }
+}
+
 async function save() {
-  const apiBaseUrl = qs("apiBaseUrl").value.trim();
+  const apiBaseUrl = normalizeBaseUrl(qs("apiBaseUrl").value);
   const apiKey = qs("apiKey").value.trim();
 
+  if (!apiBaseUrl) {
+    setPill("err", "Invalid API Base URL");
+    toast("Invalid API Base URL. Example: http://192.168.1.10:8787", "err");
+    return;
+  }
+
+  qs("apiBaseUrl").value = apiBaseUrl;   // show the corrected value
   await chrome.storage.sync.set({ apiBaseUrl, apiKey });
 
   toast("Saved ✅", "ok");
   setPill("warn", "Saved. Run a test to validate connectivity.");
+}
+
+// ---------- Notifications ----------
+const ALARM = "pollJobs";
+
+async function loadNotifyToggle() {
+  // The permission can also be revoked from the browser settings: that is the real state.
+  const granted = await chrome.permissions.contains({ permissions: ["notifications"] });
+  const { notificationsEnabled } = await chrome.storage.sync.get("notificationsEnabled");
+
+  qs("notifyToggle").checked = !!notificationsEnabled && granted;
+}
+
+function onNotifyToggle(e) {
+  const el = e.target;
+
+  if (!el.checked) {
+    chrome.storage.sync.set({ notificationsEnabled: false })
+      .then(() => chrome.alarms.clear(ALARM))
+      .then(() => chrome.permissions.remove({ permissions: ["notifications"] }))
+      .then(() => toast("Notifications disabled", "info"))
+      .catch(err => toast(err.message, "err"));
+    return;
+  }
+
+  // chrome.permissions.request must come from the user gesture: no await before this line.
+  chrome.permissions.request({ permissions: ["notifications"] })
+    .then(async (granted) => {
+      el.checked = granted;
+      await chrome.storage.sync.set({ notificationsEnabled: granted });
+      toast(granted ? "Notifications enabled \u2705" : "Permission denied", granted ? "ok" : "err");
+    })
+    .catch(err => {
+      el.checked = false;
+      toast(err.message, "err");
+    });
+}
+
+// ---------- Preset folders ----------
+const MAX_PRESETS = 10;
+
+async function getPresets() {
+  const { presetFolders } = await chrome.storage.sync.get("presetFolders");
+  return Array.isArray(presetFolders) ? presetFolders : [];
+}
+
+function renderPresets(list) {
+  const host = qs("presetList");
+  host.innerHTML = "";
+
+  list.forEach((name) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+
+    const label = document.createElement("span");
+    label.textContent = name;   // user input: textContent, never innerHTML
+
+    const del = document.createElement("button");
+    del.type = "button";
+    del.textContent = "\u00D7";
+    del.title = `Remove ${name}`;
+    del.setAttribute("aria-label", `Remove ${name}`);
+    del.addEventListener("click", () => removePreset(name).catch(e => toast(e.message, "err")));
+
+    chip.append(label, del);
+    host.appendChild(chip);
+  });
+}
+
+async function savePresets(list) {
+  const sorted = [...list].sort((a, b) => a.localeCompare(b, "it"));
+  await chrome.storage.sync.set({ presetFolders: sorted });
+  renderPresets(sorted);
+}
+
+async function addPreset() {
+  // Only trim + length cap here: the authoritative sanitization is server side
+  // (sanitizeFolderName in backend/server.js), duplicating it would mean two sources of truth.
+  const name = qs("presetInput").value.trim().slice(0, 80);
+  if (!name) return;
+
+  const list = await getPresets();
+  if (list.some(p => p.toLowerCase() === name.toLowerCase())) {
+    toast("Already in your favorites", "info");
+    return;
+  }
+  if (list.length >= MAX_PRESETS) {
+    toast(`Maximum ${MAX_PRESETS} favorites`, "err");
+    return;
+  }
+
+  await savePresets([...list, name]);
+  qs("presetInput").value = "";
+  toast("Favorite added \u2705", "ok");
+}
+
+async function removePreset(name) {
+  const list = await getPresets();
+  await savePresets(list.filter(p => p !== name));
+  toast("Favorite removed", "info");
 }
 
 async function load() {
@@ -144,6 +272,10 @@ async function load() {
   qs("apiBaseUrl").value = apiBaseUrl || "";
   qs("apiKey").value = apiKey || "";
   applyTheme(theme);
+
+  // Non-blocking: a failure here must not leave the API fields unrendered.
+  getPresets().then(renderPresets).catch(e => toast(e?.message || "Favorites unavailable", "err"));
+  loadNotifyToggle().catch(() => {});
 }
 
 async function test() {
@@ -188,6 +320,11 @@ qs("save").addEventListener("click", () => save().catch(e => toast(e.message, "e
 qs("test").addEventListener("click", () => test().catch(e => toast(e.message, "err")));
 qs("themeToggle").addEventListener("click", () => toggleTheme().catch(() => {}));
 qs("toggleApiKey").addEventListener("click", toggleApiKeyVisibility);
+qs("notifyToggle").addEventListener("change", onNotifyToggle);
+qs("presetAdd").addEventListener("click", () => addPreset().catch(e => toast(e.message, "err")));
+qs("presetInput").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") addPreset().catch(err => toast(err.message, "err"));
+});
 
 load().catch(() => {});
 setEyeIcon(true);
