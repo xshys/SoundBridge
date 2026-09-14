@@ -236,6 +236,119 @@ function renderFoldersSelect(folders) {
   if (prev && folders.includes(prev)) sel.value = prev;
 }
 
+/* ---------- Watched jobs (shared with background.js) ---------- */
+const WATCHED_JOBS_KEY = "watchedJobs";
+const ALARM = "pollJobs";
+const JOB_MAX_AGE_MS = 2 * 60 * 60 * 1000;   // matches the job TTL on the backend
+
+async function getWatchedJobs() {
+  const obj = await chrome.storage.local.get(WATCHED_JOBS_KEY);
+  const list = obj[WATCHED_JOBS_KEY];
+  if (!Array.isArray(list)) return [];
+
+  return list.filter(j => j?.id && Date.now() - (j.createdAt || 0) <= JOB_MAX_AGE_MS);
+}
+
+async function setWatchedJobs(list) {
+  await chrome.storage.local.set({ [WATCHED_JOBS_KEY]: list });
+}
+
+async function addWatchedJob(job) {
+  await setWatchedJobs([...(await getWatchedJobs()), job]);
+
+  // The popup dies when it closes: from here on the alarm is what keeps watching.
+  const { notificationsEnabled } = await chrome.storage.sync.get("notificationsEnabled");
+  if (!notificationsEnabled) return;
+  if (!(await chrome.permissions.contains({ permissions: ["notifications"] }))) return;
+
+  await chrome.alarms.create(ALARM, { periodInMinutes: 1 });
+}
+
+// A popup closes as soon as it loses focus: if we are here, the user watched the job finish
+// and a notification would be noise. The background only notifies jobs nobody was watching.
+async function dropWatchedJob(jobId) {
+  await setWatchedJobs((await getWatchedJobs()).filter(j => j.id !== jobId));
+}
+
+/* ---------- Server features ---------- */
+let serverFeatures = [];
+
+async function loadFeatures() {
+  try {
+    const health = await apiFetch("/api/health", { method: "GET" });
+    serverFeatures = Array.isArray(health?.features) ? health.features : [];
+  } catch {
+    // Old or unreachable backend: no features, so no UI the server cannot back.
+    serverFeatures = [];
+  }
+}
+
+// Watch Later and Liked need a login: the server rejects them, this only hides the checkbox
+// so we don't offer a path that is certain to fail. The server stays the authority.
+const PLAYLIST_URL_RE = /[?&]list=(?!WL|LL)[A-Za-z0-9_-]+/;
+
+function updatePlaylistRow() {
+  const row = qs("playlistRow");
+  const supported = serverFeatures.includes("playlist") && PLAYLIST_URL_RE.test(qs("youtubeUrl").value);
+
+  row.hidden = !supported;
+  if (row.hidden) qs("playlistMode").checked = false;
+}
+
+/* ---------- Preset folders + last used ---------- */
+const LAST_FOLDER_KEY = "lastFolder";
+
+function markActiveChip(name) {
+  document.querySelectorAll("#presetChips .chip").forEach((el) => {
+    el.classList.toggle("active", el.dataset.folder === name);
+  });
+}
+
+function pickFolder(name) {
+  const sel = qs("folderSelect");
+  const exists = [...sel.options].some(o => o.value === name);
+
+  if (exists) {
+    sel.value = name;
+    qs("newFolder").value = "";
+  } else {
+    // Not on the server yet: yt-dlp creates it on the first download.
+    qs("newFolder").value = name;
+  }
+  markActiveChip(name);
+}
+
+async function renderPresetChips() {
+  const { presetFolders } = await chrome.storage.sync.get("presetFolders");
+  const list = Array.isArray(presetFolders) ? presetFolders : [];
+
+  const host = qs("presetChips");
+  host.innerHTML = "";
+  host.hidden = list.length === 0;
+
+  list.forEach((name) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "chip";
+    btn.dataset.folder = name;
+    btn.textContent = name;   // user input: textContent, never innerHTML
+    btn.addEventListener("click", () => pickFolder(name));
+    host.appendChild(btn);
+  });
+}
+
+async function applyLastFolder() {
+  const obj = await chrome.storage.local.get(LAST_FOLDER_KEY);
+  const last = obj[LAST_FOLDER_KEY];
+  if (!last) return;
+
+  const sel = qs("folderSelect");
+  if ([...sel.options].some(o => o.value === last)) {
+    sel.value = last;
+    markActiveChip(last);
+  }
+}
+
 async function refreshFoldersFromApi({ showToast = true } = {}) {
   setStatus("Loading folders...");
   setLog("");
@@ -266,6 +379,7 @@ async function loadFolders() {
 
 async function doDownload() {
   const youtubeUrl = qs("youtubeUrl").value.trim();
+  const playlist = !qs("playlistRow").hidden && qs("playlistMode").checked;
   const newFolder = qs("newFolder").value.trim();
   const folderSelect = qs("folderSelect").value;
 
@@ -275,34 +389,50 @@ async function doDownload() {
   if (!youtubeUrl) throw new Error("Please provide a YouTube URL.");
   if (!folder) throw new Error("Select an existing folder or type a new one.");
 
-  // UI lock
+  // Lock right away: the POST can take a moment and a double click would create two jobs.
   setDownloadingUI(true);
   setStatus("Job created…");
   setLog("");
   toast("Job started…", "info");
 
-  // Create job
-  const start = await apiFetch("/api/youtube/download", {
-    method: "POST",
-    body: JSON.stringify({ youtubeUrl, folder })
-  });
+  try {
+    const start = await apiFetch("/api/youtube/download", {
+      method: "POST",
+      body: JSON.stringify({ youtubeUrl, folder, playlist })
+    });
 
-  const jobId = start?.jobId;
-  if (!jobId) throw new Error("Missing jobId from server");
+    const jobId = start?.jobId;
+    if (!jobId) throw new Error("Missing jobId from server");
 
-  toast(`Job ID: ${jobId}`, "info", 1500);
+    toast(`Job ID: ${jobId}`, "info", 1500);
+    await addWatchedJob({ id: jobId, folder, createdAt: Date.now() });
 
-  // Poll job + live logs
+    return await followJob(jobId, { folder, isNewFolder });
+  } catch (e) {
+    setDownloadingUI(false);   // followJob has its own finally, this covers the failures before it
+    throw e;
+  }
+}
+
+/* ---------- Following a job (new, or resumed after the popup was reopened) ---------- */
+async function followJob(jobId, { folder, isNewFolder = false } = {}) {
+  setDownloadingUI(true);
+
   try {
     const finalJob = await pollJobUntilDone(jobId, {
       onProgress: (job) => {
         if (!job) return;
-        if (job.status === "running") setStatus("Downloading…");
+        if (job.status !== "running") return;
+
+        setStatus(job.progress ? `Track ${job.progress.current}/${job.progress.total}` : "Downloading…");
       }
     });
 
     setStatus("Done ✅", "ok");
     toast("Download completed ✅", "ok");
+
+    await chrome.storage.local.set({ [LAST_FOLDER_KEY]: folder });
+    await dropWatchedJob(jobId);
 
     // Refresh folders ONLY if user created a new one
     if (isNewFolder) {
@@ -315,10 +445,30 @@ async function doDownload() {
   } catch (e) {
     setStatus(e?.message || "Download failed", "err");
     toast(e?.message || "Download failed", "err", 3200);
+    await dropWatchedJob(jobId);
     throw e;
   } finally {
     setDownloadingUI(false);
   }
+}
+
+/**
+ * Resumes the jobs still in the list when the popup is reopened. No log needs to be stored
+ * anywhere: pollJobUntilDone restarts from since=0 and the server replays its whole buffer,
+ * so restoring the view is a free side effect of the polling that already exists.
+ */
+async function restoreWatchedJobs() {
+  const jobs = await getWatchedJobs();
+  await setWatchedJobs(jobs);          // drops the ones past the TTL
+  if (jobs.length === 0) return;
+
+  const [latest, ...others] = [...jobs].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  if (others.length) {
+    appendLogsToTextarea([`[out] ${jobs.length} jobs in progress - showing the most recent`]);
+  }
+
+  setStatus("Resuming…");
+  await followJob(latest.id, { folder: latest.folder }).catch(() => {});
 }
 
 /* ---------- Init ---------- */
@@ -338,17 +488,31 @@ async function doDownload() {
     toast(e.message, "err", 3200);
   }));
 
+  qs("youtubeUrl").addEventListener("input", updatePlaylistRow);
+
   const url = await getActiveTabUrl();
   if (url.includes("youtube.com") || url.includes("youtu.be")) {
     qs("youtubeUrl").value = url;
   }
 
+  await loadFeatures();
+  updatePlaylistRow();
+
+  // Presets are a convenience: if storage.sync is unavailable the popup must still work.
+  await renderPresetChips().catch(e => toast(e?.message || "Favorites unavailable", "err", 2000));
+
   try {
     await loadFolders();
+    await applyLastFolder().catch(() => {});
   } catch (e) {
     setStatus(e.message, "err");
     toast(e.message, "err", 3200);
   }
+
+  // Deliberately not awaited: with a job still running this promise lasts as long as the
+  // download, and folders and favorites must already be on screen. It goes last so its status
+  // is not overwritten by loadFolders.
+  restoreWatchedJobs().catch(() => {});
 })();
 
 window.addEventListener("unload", () => {

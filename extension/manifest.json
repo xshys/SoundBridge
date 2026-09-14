@@ -3,15 +3,32 @@
   "name": "SoundBridge",
   "short_name": "SoundBridge",
   "description": "Send audio from supported videos directly to your personal server music library.",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "icons": {
     "16": "icon16.png",
     "32": "icon32.png",
     "48": "icon48.png",
     "128": "icon128.png"
   },
-  "permissions": ["storage", "activeTab", "tabs"],
-  "host_permissions": ["https://*/", "http://*/"],
+  "permissions": [
+    "storage",
+    "activeTab",
+    "tabs",
+    "alarms"
+  ],
+  "optional_permissions": [
+    "notifications"
+  ],
+  "host_permissions": [
+    "https://*/",
+    "http://*/"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": [
+      "background.js"
+    ]
+  },
   "action": {
     "default_icon": {
       "16": "icon16.png",
@@ -28,7 +45,9 @@
       "id": "soundbridge@antonioviola.dev",
       "strict_min_version": "142.0",
       "data_collection_permissions": {
-        "required": ["none"]
+        "required": [
+          "none"
+        ]
       }
     }
   }

@@ -248,6 +248,42 @@
       outline: none;
     }
 
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 2px;
+      font-size: 12px;
+      color: var(--text);
+      cursor: pointer;
+    }
+    /* .check sets display:flex, which would beat the browser rule for [hidden] */
+    .check[hidden] { display: none; }
+    .check input { accent-color: var(--primary); cursor: pointer; }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .chip {
+      padding: 6px 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--outline);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 12px;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background .15s ease, border-color .15s ease;
+    }
+    .chip:hover { background: var(--surface-2); }
+    .chip:focus { outline: none; box-shadow: var(--ring); }
+    .chip.active {
+      background: var(--surface-2);
+      border-color: var(--primary);
+    }
+
     .divider {
       height: 1px;
       background: var(--outline);
@@ -288,6 +324,13 @@
     .heart {
       color: var(--danger);
       font-weight: 900;
+    }
+    .version {
+      text-align: center;
+      font-size: 11px;
+      color: var(--muted);
+      margin: 0;
+      letter-spacing: .15px;
     }
 
     /* Toasts */
@@ -389,6 +432,16 @@
         <input id="youtubeUrl" class="field" placeholder="https://www.youtube.com/watch?v=..." />
       </div>
 
+      <label id="playlistRow" class="check" hidden>
+        <input type="checkbox" id="playlistMode" />
+        <span>Download the whole playlist</span>
+      </label>
+
+      <div>
+        <label>Favorite folders</label>
+        <div id="presetChips" class="chips" hidden></div>
+      </div>
+
       <div>
         <label>Existing folder</label>
         <select id="folderSelect" class="field"></select>
@@ -421,7 +474,7 @@
 
     <div class="footer">
       <div class="donate-row">
-        <a href="https://www.paypal.me/xShys91" target="_blank" rel="noopener noreferrer">
+        <a href="https://www.paypal.me/xShys91" target="_blank" rel="noopener noreferrer" hidden>
           <button class="btn btn-secondary btn-donate" type="button">
             <!-- PayPal SVG -->
             <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -449,7 +502,10 @@
       </div>
 
       <p class="signature">
-        Made with <span class="heart">❤️</span> by <strong>Antonio Viola</strong>
+        Made with <span class="heart">❤️</span> by <a style="text-decoration: none; color: inherit;" href="https://antonioviola.dev" target="_blank" rel="noopener noreferrer"><strong>Antonio Viola</strong></a>
+      </p>
+      <p class="version">
+        Version 1.0.5
       </p>
     </div>
   </div>

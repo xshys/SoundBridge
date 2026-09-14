@@ -6,6 +6,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { spawn } from "child_process";
+import { audioConfig, buildYtDlpArgs, getPlaylistId, isValidYouTubeUrl, parseProgress } from "./ytdlp.js";
 
 const app = express();
 
@@ -14,6 +15,10 @@ const API_KEY = (process.env.API_KEY || "").trim();
 const MUSIC_ROOT = (process.env.MUSIC_ROOT || "/music").trim();
 const YTDLP_CONTAINER = (process.env.YTDLP_CONTAINER || "yt-dlp-music").trim();
 const CORS_ORIGINS = (process.env.CORS_ORIGINS || "").split(",").map(s => s.trim()).filter(Boolean);
+const VERSION = process.env.npm_package_version || "unknown";
+const AUDIO = audioConfig();
+const MAX_PLAYLIST_ITEMS = parseInt(process.env.MAX_PLAYLIST_ITEMS || "50", 10);
+const MAX_CONCURRENT_JOBS = parseInt(process.env.MAX_CONCURRENT_JOBS || "2", 10);
 
 if (!API_KEY) {
   console.error("Missing API_KEY in env");
@@ -48,19 +53,6 @@ function auth(req, res, next) {
     return res.status(401).json({ error: "Unauthorized" });
   }
   next();
-}
-
-function isValidYouTubeUrl(url) {
-  try {
-    const u = new URL(url);
-    const host = u.hostname.replace(/^www\./, "");
-    const okHost = ["youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"].includes(host);
-    if (!okHost) return false;
-    if (host === "youtu.be") return u.pathname.length > 1;
-    if (u.pathname === "/watch") return !!u.searchParams.get("v");
-    if (u.pathname.startsWith("/shorts/")) return u.pathname.split("/").filter(Boolean).length >= 2;
-    return false;
-  } catch { return false; }
 }
 
 function sanitizeFolderName(name) {
@@ -121,34 +113,24 @@ function cleanupJobs() {
 setInterval(cleanupJobs, 60 * 1000).unref();
 
 // -------------------- yt-dlp runner (async) --------------------
-function spawnDockerExecYtDlp({ youtubeUrl, folder, job }) {
-  const outputTpl = `/music/${folder}/%(artist,uploader)s - %(title)s.%(ext)s`;
-
+function spawnDockerExecYtDlp({ youtubeUrl, folder, playlist, job }) {
   const args = [
     "exec",
     "-i",
     YTDLP_CONTAINER,
     "yt-dlp",
-    "--extractor-args", "youtube:player_client=android",
-    "--retries", "10",
-    "--fragment-retries", "10",
-    "-x",
-    "--audio-format", "mp3",
-    "--audio-quality", "0",
-    "--embed-metadata",
-    "--embed-thumbnail",
-    "--no-playlist",
-    "--restrict-filenames",
-    "--newline",
-    "-o", outputTpl,
-    youtubeUrl
+    ...buildYtDlpArgs({ youtubeUrl, folder, playlist, maxPlaylistItems: MAX_PLAYLIST_ITEMS }, AUDIO)
   ];
 
   const p = spawn("docker", args, { stdio: ["ignore", "pipe", "pipe"] });
 
   const onData = (buf, src) => {
     const text = buf.toString();
-    text.split(/\r?\n/).filter(Boolean).forEach(line => appendLog(job, `[${src}] ${line}`));
+    text.split(/\r?\n/).filter(Boolean).forEach(line => {
+      const progress = parseProgress(line);
+      if (progress) job.progress = progress;
+      appendLog(job, `[${src}] ${line}`);
+    });
   };
 
   p.stdout.on("data", d => onData(d, "out"));
@@ -178,7 +160,11 @@ function spawnDockerExecYtDlp({ youtubeUrl, folder, job }) {
 }
 
 // -------------------- Routes --------------------
-app.get("/api/health", (req, res) => res.json({ ok: true }));
+app.get("/api/health", (req, res) => res.json({
+  ok: true,
+  version: VERSION,
+  features: AUDIO.normalize ? ["playlist", "normalize"] : ["playlist"]
+}));
 
 app.get("/api/music/folders", auth, (req, res) => {
   try {
@@ -194,20 +180,23 @@ app.post("/api/youtube/download", auth, async (req, res) => {
   const youtubeUrl = (req.body?.youtubeUrl || "").trim();
   const folderIn = (req.body?.folder || "").trim();
   const folder = sanitizeFolderName(folderIn);
+  const playlist = req.body?.playlist === true;   // default: single video, same as older extensions
 
   if (!youtubeUrl || !isValidYouTubeUrl(youtubeUrl)) return res.status(400).json({ error: "Invalid youtubeUrl" });
+  if (playlist && !getPlaylistId(youtubeUrl)) return res.status(400).json({ error: "Unsupported or sign-in only playlist" });
   if (!folder) return res.status(400).json({ error: "Invalid folder" });
   if (!fs.existsSync(MUSIC_ROOT)) return res.status(500).json({ error: "MUSIC_ROOT missing" });
+
+  // A playlist is a single job but N downloads: with no cap, two requests saturate the line.
+  const running = [...JOBS.values()].filter(j => j.status === "queued" || j.status === "running").length;
+  if (running >= MAX_CONCURRENT_JOBS) return res.status(429).json({ error: "Too many concurrent jobs" });
 
   const targetDir = path.join(MUSIC_ROOT, folder);
   if (!ensureInsideRoot(targetDir)) return res.status(400).json({ error: "Folder outside root" });
 
-  // Create folder upfront (so it exists immediately)
-  try {
-    fs.mkdirSync(targetDir, { recursive: true });
-  } catch {
-    return res.status(500).json({ error: "Failed to create folder" });
-  }
+  // The folder is created by yt-dlp, not here: this container runs as root (it needs the
+  // docker socket), so a folder created here would be root-owned and unwritable by the
+  // yt-dlp container running as a normal user. One writer, one owner, no split permissions.
 
   const id = newJobId();
   const job = {
@@ -215,6 +204,8 @@ app.post("/api/youtube/download", auth, async (req, res) => {
     status: "queued",
     folder,
     youtubeUrl,
+    playlist,
+    progress: null,
     createdAt: Date.now(),
     startedAt: null,
     finishedAt: null,
@@ -232,7 +223,7 @@ app.post("/api/youtube/download", auth, async (req, res) => {
     job.status = "running";
     job.startedAt = Date.now();
     appendLog(job, "[out] ▶ Starting yt-dlp...");
-    spawnDockerExecYtDlp({ youtubeUrl, folder, job });
+    spawnDockerExecYtDlp({ youtubeUrl, folder, playlist, job });
   }, 0);
 
   return res.json({ ok: true, jobId: id });
@@ -256,6 +247,8 @@ app.get("/api/downloads/:jobId", auth, (req, res) => {
       status: job.status,
       folder: job.folder,
       youtubeUrl: job.youtubeUrl,
+      playlist: job.playlist,
+      progress: job.progress,
       createdAt: job.createdAt,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,
@@ -271,6 +264,7 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`API listening on :${PORT}`);
   console.log(`MUSIC_ROOT=${MUSIC_ROOT}`);
   console.log(`YTDLP_CONTAINER=${YTDLP_CONTAINER}`);
+  console.log(`AUDIO=${AUDIO.format}/q${AUDIO.quality} normalize=${AUDIO.normalize ? AUDIO.loudnormTarget + " LUFS" : "off"}`);
 });
 
 /*
